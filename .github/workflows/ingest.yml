@@ -1,0 +1,56 @@
+name: Ingest changed docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**/*.md'
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests python-frontmatter
+
+      - name: Get changed files
+        id: diff
+        run: |
+          git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'docs/**/*.md' \
+            > upserted.txt || true
+          git diff --name-only --diff-filter=D HEAD~1 HEAD -- 'docs/**/*.md' \
+            > deleted.txt || true
+          echo "Upserted:" && cat upserted.txt
+          echo "Deleted:"  && cat deleted.txt
+
+      - name: Ingest upserted docs
+        env:
+          LIGHTRAG_URL: ${{ secrets.LIGHTRAG_URL }}
+          LIGHTRAG_API_KEY: ${{ secrets.LIGHTRAG_API_KEY }}
+        run: |
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "Ingesting $f"
+            python scripts/ingest.py upsert "$f"
+          done < upserted.txt
+
+      - name: Delete removed docs
+        env:
+          LIGHTRAG_URL: ${{ secrets.LIGHTRAG_URL }}
+          LIGHTRAG_API_KEY: ${{ secrets.LIGHTRAG_API_KEY }}
+        run: |
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "Deleting $f"
+            python scripts/ingest.py delete "$f"
+          done < deleted.txt

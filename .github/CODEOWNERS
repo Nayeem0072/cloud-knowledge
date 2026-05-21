@@ -1,0 +1,3 @@
+# All knowledge base documents require review from the KB reviewers team.
+# Update the team slug to match your GitHub organisation.
+docs/ @your-org/knowledge-base-reviewers
