@@ -8,8 +8,8 @@ Centralised, cloud-hosted knowledge base for Claude Code. Uses LightRAG (graph +
 Markdown docs (this repo)
   → GitHub Action on merge to main
   → scripts/ingest.py (frontmatter → graph triples → LightRAG /insert)
-  → LightRAG on Railway (NetworkX graph + vector index)
-  → MCP server on Railway (FastAPI wrapper)
+  → LightRAG on OCI VM (NetworkX graph + vector index)
+  → MCP server on OCI VM (FastAPI wrapper, nginx reverse proxy)
   → Claude Code via ~/.claude/config.json
 ```
 
@@ -36,44 +36,127 @@ knowledge-base/
 
 ## Deployment
 
-### 1. Deploy LightRAG on Railway
+### Prerequisites
 
-1. Go to [railway.app](https://railway.app) → New project → Deploy from Docker image
-2. Image: `ghcr.io/hkuedl/lightrag:latest`
-3. Set environment variables:
+- OCI VM (Ubuntu 22.04 recommended, at least 2 OCPU / 4 GB RAM)
+- Docker + Docker Compose installed
+- A domain or public IP for the VM
+- OCI Security List / firewall rules: open ports 80 and 443 (or whichever port you expose)
 
-| Variable | Value |
-|----------|-------|
-| `LIGHTRAG_WORKING_DIR` | `/data` |
-| `OPENAI_API_KEY` | `sk-...` |
-| `LIGHTRAG_LLM_MODEL` | `gpt-4o-mini` |
-| `LIGHTRAG_EMBEDDING_MODEL` | `text-embedding-3-small` |
-| `API_KEY` | a random secret (used to auth ingest + MCP calls) |
+### 1. Provision the OCI VM
 
-4. Copy the Railway public URL (e.g. `https://kb-production.up.railway.app`)
+```bash
+# SSH into your VM
+ssh ubuntu@<your-oci-public-ip>
 
-### 2. Deploy MCP server on Railway
+# Install Docker
+sudo apt update && sudo apt install -y docker.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+```
 
-1. Add a second service in the same Railway project
-2. Deploy `mcp/server.py` — start command: `uvicorn mcp.server:app --host 0.0.0.0 --port $PORT`
-3. Set environment variables:
+Open the required ports in OCI Console → Networking → Virtual Cloud Network → Security Lists:
+- Ingress: TCP 80 and 443 from `0.0.0.0/0`
+- (Optional) TCP 8080 / 8000 for direct access during testing
 
-| Variable | Value |
-|----------|-------|
-| `LIGHTRAG_URL` | Your LightRAG Railway URL |
-| `LIGHTRAG_API_KEY` | Same as `API_KEY` above |
-| `MCP_API_KEY` | A separate random secret for MCP auth |
+### 2. Deploy LightRAG
 
-### 3. Add GitHub Secrets
+```bash
+mkdir -p ~/kb && cd ~/kb
+mkdir -p data/lightrag
+
+# Create docker-compose.yml
+cat > docker-compose.yml <<'EOF'
+services:
+  lightrag:
+    image: ghcr.io/hkuedl/lightrag:latest
+    restart: unless-stopped
+    ports:
+      - "9621:9621"
+    volumes:
+      - ./data/lightrag:/data
+    environment:
+      LIGHTRAG_WORKING_DIR: /data
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LIGHTRAG_LLM_MODEL: ${LIGHTRAG_LLM_MODEL:-gpt-4o-mini}
+      LIGHTRAG_EMBEDDING_MODEL: ${LIGHTRAG_EMBEDDING_MODEL:-text-embedding-3-small}
+      API_KEY: ${LIGHTRAG_API_KEY}
+
+  mcp:
+    build: ./mcp
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      LIGHTRAG_URL: http://lightrag:9621
+      LIGHTRAG_API_KEY: ${LIGHTRAG_API_KEY}
+      MCP_API_KEY: ${MCP_API_KEY}
+    depends_on:
+      - lightrag
+EOF
+
+# Create .env (never commit this)
+cat > .env <<'EOF'
+OPENAI_API_KEY=sk-...
+LIGHTRAG_API_KEY=<random-secret>
+MCP_API_KEY=<separate-random-secret>
+EOF
+chmod 600 .env
+
+docker compose up -d
+```
+
+> The `mcp` service expects a `Dockerfile` in the `mcp/` directory. Add one that runs:
+> `CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]`
+
+### 3. Expose via nginx (HTTPS)
+
+Install nginx and certbot, then create `/etc/nginx/sites-available/kb`:
+
+```nginx
+server {
+    listen 80;
+    server_name <your-domain-or-ip>;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name <your-domain-or-ip>;
+
+    ssl_certificate     /etc/letsencrypt/live/<your-domain>/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/<your-domain>/privkey.pem;
+
+    # MCP server
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # LightRAG API (optional — restrict if not needed publicly)
+    location /lightrag/ {
+        proxy_pass http://127.0.0.1:9621/;
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/kb /etc/nginx/sites-enabled/
+sudo certbot --nginx -d <your-domain>
+sudo nginx -s reload
+```
+
+### 4. Add GitHub Secrets
 
 In this repo → Settings → Secrets and variables → Actions:
 
 | Secret | Value |
 |--------|-------|
-| `LIGHTRAG_URL` | Your LightRAG Railway URL |
-| `LIGHTRAG_API_KEY` | Same as `API_KEY` above |
+| `LIGHTRAG_URL` | `https://<your-domain>/lightrag` (or `http://<public-ip>:9621` if not behind nginx) |
+| `LIGHTRAG_API_KEY` | Same as `LIGHTRAG_API_KEY` in `.env` |
 
-### 4. Configure Claude Code
+### 5. Configure Claude Code
 
 Add to `~/.claude/config.json`:
 
@@ -81,26 +164,34 @@ Add to `~/.claude/config.json`:
 {
   "mcpServers": {
     "knowledge-base": {
-      "url": "https://your-mcp-server.up.railway.app",
+      "url": "https://<your-domain>",
       "type": "http",
       "headers": {
-        "x-api-key": "your-mcp-key"
+        "x-api-key": "<MCP_API_KEY>"
       }
     }
   }
 }
 ```
 
-### 5. Seed manually (first time)
+### 6. Seed manually (first time)
 
 ```bash
 pip install requests python-frontmatter
-export LIGHTRAG_URL=https://kb-production.up.railway.app
-export LIGHTRAG_API_KEY=your-secret-key
+export LIGHTRAG_URL=https://<your-domain>/lightrag
+export LIGHTRAG_API_KEY=<your-lightrag-api-key>
 
 for f in docs/features/*.md docs/services/*.md; do
   python scripts/ingest.py upsert "$f"
 done
+```
+
+### Systemd / persistence
+
+Docker Compose with `restart: unless-stopped` will restart containers after a VM reboot automatically, as long as the Docker daemon is enabled:
+
+```bash
+sudo systemctl enable docker
 ```
 
 ## Document schema
