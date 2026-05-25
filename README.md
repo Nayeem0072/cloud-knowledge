@@ -77,9 +77,13 @@ services:
       - ./data/lightrag:/data
     environment:
       LIGHTRAG_WORKING_DIR: /data
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      LIGHTRAG_LLM_MODEL: ${LIGHTRAG_LLM_MODEL:-gpt-4o}
-      LIGHTRAG_EMBEDDING_MODEL: ${LIGHTRAG_EMBEDDING_MODEL:-text-embedding-3-small}
+      LLM_BINDING: openai
+      LLM_BINDING_API_KEY: ${OPENAI_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
+      EMBEDDING_BINDING: openai
+      EMBEDDING_BINDING_API_KEY: ${OPENAI_API_KEY}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
       API_KEY: ${LIGHTRAG_API_KEY}
 
   mcp:
@@ -100,12 +104,18 @@ cat > .env <<'EOF'
 OPENAI_API_KEY=sk-...
 LIGHTRAG_API_KEY=<random-secret>
 MCP_API_KEY=<separate-random-secret>
+LLM_BINDING=openai
+LLM_MODEL=gpt-4.1-mini
+EMBEDDING_BINDING=openai
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIM=1536
 EOF
 chmod 600 .env
 
-# Copy the mcp/ directory from this repo to the VM before starting
-# (the mcp service builds locally — it is not pulled from a registry)
-# From your local machine:
+# Copy the mcp/ directory to ~/kb/ before starting.
+# If you have the repo cloned on the VM (e.g. /root/kb-code/cloud-knowledge):
+#   cp -r /root/kb-code/cloud-knowledge/mcp ~/kb/mcp
+# Or from your local machine:
 #   scp -r ./mcp root@<your-oci-ip>:~/kb/
 
 docker compose up -d
