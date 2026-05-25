@@ -25,20 +25,21 @@ LIGHTRAG_KEY = os.environ["LIGHTRAG_API_KEY"]
 def _get_token() -> str:
     """
     Fetch a bearer token from LightRAG.
-    When auth is disabled LightRAG issues a guest token; when auth is enabled
-    it expects the API key as the password via /login.
+    Checks auth-status first: if auth is disabled, uses the guest token directly.
+    If auth is enabled, logs in with the configured API key.
     """
-    # Try the configured API key first (auth enabled mode)
+    status = requests.get(f"{LIGHTRAG_URL}/auth-status", timeout=10)
+    status.raise_for_status()
+    data = status.json()
+
+    if not data.get("auth_configured", True):
+        return data["access_token"]
+
     resp = requests.post(
         f"{LIGHTRAG_URL}/login",
         data={"username": "admin", "password": LIGHTRAG_KEY},
         timeout=10,
     )
-    if resp.ok:
-        return resp.json()["access_token"]
-
-    # Fall back to guest token (auth disabled mode)
-    resp = requests.get(f"{LIGHTRAG_URL}/auth-status", timeout=10)
     resp.raise_for_status()
     return resp.json()["access_token"]
 

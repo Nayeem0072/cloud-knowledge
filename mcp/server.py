@@ -33,11 +33,20 @@ _cached_token: str | None = None
 def _lg_token() -> str:
     """
     Fetch a bearer token from LightRAG.
-    Tries API key login first (auth enabled); falls back to guest token (auth disabled).
+    Checks auth-status first: if auth is disabled, uses the guest token directly.
+    If auth is enabled, logs in with the configured API key.
     Result is cached for the lifetime of the process.
     """
     global _cached_token
     if _cached_token:
+        return _cached_token
+
+    status = requests.get(f"{LIGHTRAG_URL}/auth-status", timeout=10)
+    status.raise_for_status()
+    data = status.json()
+
+    if not data.get("auth_configured", True):
+        _cached_token = data["access_token"]
         return _cached_token
 
     resp = requests.post(
@@ -45,11 +54,6 @@ def _lg_token() -> str:
         data={"username": "admin", "password": LIGHTRAG_KEY},
         timeout=10,
     )
-    if resp.ok:
-        _cached_token = resp.json()["access_token"]
-        return _cached_token
-
-    resp = requests.get(f"{LIGHTRAG_URL}/auth-status", timeout=10)
     resp.raise_for_status()
     _cached_token = resp.json()["access_token"]
     return _cached_token
