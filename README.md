@@ -133,16 +133,22 @@ Add a path-based route to your existing HAProxy config. Back up first:
 cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak.$(date +%Y%m%d)
 ```
 
-In `frontend https_front`, add the KB ACL **before** any catch-all path rule:
+In `frontend https_front`, add the KB ACLs **before** any catch-all path rule:
 
 ```haproxy
 frontend https_front
     bind *:443 ssl crt /your/cert.pem
 
-    acl host_main hdr(host) -i <your-domain>
-    acl url_kb    path_beg /kb
+    acl host_main    hdr(host) -i <your-domain>
+    acl url_kb       path_beg /kb
+    acl url_lightrag path_beg /lightrag
+    acl url_webui    path_beg /webui
+    acl url_static   path_beg /static
 
-    use_backend kb_mcp_backend if host_main url_kb
+    use_backend kb_mcp_backend      if host_main url_kb
+    use_backend kb_lightrag_backend if host_main url_lightrag
+    use_backend kb_lightrag_backend if host_main url_webui
+    use_backend kb_lightrag_backend if host_main url_static
     # ... your existing use_backend rules below ...
 
 backend kb_mcp_backend
@@ -150,9 +156,20 @@ backend kb_mcp_backend
     option forwardfor
     http-request set-path "%[path,regsub(^/kb,)]"
     server mcp_1 127.0.0.1:8000 check
+
+backend kb_lightrag_backend
+    balance roundrobin
+    option forwardfor
+    http-request set-path "%[path,regsub(^/lightrag,)]"
+    server lightrag_1 127.0.0.1:9621 check
 ```
 
-The `/kb` ACL must come before any catch-all path rule (`path_beg /`) or it will never match.
+The `/webui` and `/static` ACLs are needed because the LightRAG Web UI redirects to these absolute
+paths after the `/lightrag` prefix is stripped. All KB ACLs must come before any catch-all path
+rule (`path_beg /`) or they will never match.
+
+> The LightRAG Web UI (for graph visualisation and debugging) is accessible at
+> `https://<your-domain>/lightrag/`
 
 ```bash
 haproxy -c -f /etc/haproxy/haproxy.cfg   # validate
