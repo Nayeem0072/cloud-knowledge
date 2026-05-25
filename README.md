@@ -69,7 +69,7 @@ mkdir -p data/lightrag
 cat > docker-compose.yml <<'EOF'
 services:
   lightrag:
-    image: ghcr.io/hkuedl/lightrag:latest
+    image: ghcr.io/hkuds/lightrag:latest
     restart: unless-stopped
     ports:
       - "9621:9621"
@@ -78,7 +78,7 @@ services:
     environment:
       LIGHTRAG_WORKING_DIR: /data
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      LIGHTRAG_LLM_MODEL: ${LIGHTRAG_LLM_MODEL:-gpt-4o-mini}
+      LIGHTRAG_LLM_MODEL: ${LIGHTRAG_LLM_MODEL:-gpt-4o}
       LIGHTRAG_EMBEDDING_MODEL: ${LIGHTRAG_EMBEDDING_MODEL:-text-embedding-3-small}
       API_KEY: ${LIGHTRAG_API_KEY}
 
@@ -103,48 +103,56 @@ MCP_API_KEY=<separate-random-secret>
 EOF
 chmod 600 .env
 
+# Copy the mcp/ directory from this repo to the VM before starting
+# (the mcp service builds locally — it is not pulled from a registry)
+# From your local machine:
+#   scp -r ./mcp root@<your-oci-ip>:~/kb/
+
 docker compose up -d
 ```
 
-> The `mcp` service expects a `Dockerfile` in the `mcp/` directory. Add one that runs:
-> `CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]`
+> The `mcp` service builds from `mcp/Dockerfile` in this repo. Copy the `mcp/` directory
+> to `~/kb/mcp/` on the VM before running `docker compose up -d`, otherwise the build step
+> will fail with "path not found".
 
-### 3. Expose via nginx (HTTPS)
+### 3. Expose via HAProxy
 
-Install nginx and certbot, then create `/etc/nginx/sites-available/kb`:
-
-```nginx
-server {
-    listen 80;
-    server_name <your-domain-or-ip>;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name <your-domain-or-ip>;
-
-    ssl_certificate     /etc/letsencrypt/live/<your-domain>/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/<your-domain>/privkey.pem;
-
-    # MCP server
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # LightRAG API (optional — restrict if not needed publicly)
-    location /lightrag/ {
-        proxy_pass http://127.0.0.1:9621/;
-    }
-}
-```
+Add a path-based route to your existing HAProxy config. Back up first:
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/kb /etc/nginx/sites-enabled/
-sudo certbot --nginx -d <your-domain>
-sudo nginx -s reload
+cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak.$(date +%Y%m%d)
+```
+
+In `frontend https_front`, add the KB ACL **before** any catch-all path rule:
+
+```haproxy
+frontend https_front
+    bind *:443 ssl crt /your/cert.pem
+
+    acl host_main hdr(host) -i <your-domain>
+    acl url_kb    path_beg /kb
+
+    use_backend kb_mcp_backend if host_main url_kb
+    # ... your existing use_backend rules below ...
+
+backend kb_mcp_backend
+    balance roundrobin
+    option forwardfor
+    http-request set-path "%[path,regsub(^/kb,)]"
+    server mcp_1 127.0.0.1:8000 check
+```
+
+The `/kb` ACL must come before any catch-all path rule (`path_beg /`) or it will never match.
+
+```bash
+haproxy -c -f /etc/haproxy/haproxy.cfg   # validate
+systemctl reload haproxy
+```
+
+Verify:
+```bash
+curl https://<your-domain>/kb/health
+# {"status": "ok"}
 ```
 
 ### 4. Add GitHub Secrets
@@ -153,7 +161,7 @@ In this repo → Settings → Secrets and variables → Actions:
 
 | Secret | Value |
 |--------|-------|
-| `LIGHTRAG_URL` | `https://<your-domain>/lightrag` (or `http://<public-ip>:9621` if not behind nginx) |
+| `LIGHTRAG_URL` | `https://<your-domain>/kb` (or `http://<public-ip>:9621` for direct access) |
 | `LIGHTRAG_API_KEY` | Same as `LIGHTRAG_API_KEY` in `.env` |
 
 ### 5. Configure Claude Code
@@ -178,13 +186,14 @@ Add to `~/.claude/config.json`:
 
 ```bash
 pip install requests python-frontmatter
-export LIGHTRAG_URL=https://<your-domain>/lightrag
+
+export LIGHTRAG_URL=https://<your-domain>/kb
 export LIGHTRAG_API_KEY=<your-lightrag-api-key>
 
-for f in docs/features/*.md docs/services/*.md; do
-  python scripts/ingest.py upsert "$f"
-done
+python scripts/seed.py
 ```
+
+`seed.py` walks all `docs/**/*.md`, ingests each file, and reports a per-file success/failure summary. Run it any time you need to re-seed a fresh LightRAG instance.
 
 ### Systemd / persistence
 

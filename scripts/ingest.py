@@ -13,6 +13,7 @@ Required environment variables:
 import sys
 import json
 import os
+import datetime
 import requests
 import frontmatter  # pip install python-frontmatter
 
@@ -21,9 +22,30 @@ LIGHTRAG_URL = os.environ["LIGHTRAG_URL"].rstrip("/")
 LIGHTRAG_KEY = os.environ["LIGHTRAG_API_KEY"]
 
 
+def _get_token() -> str:
+    """
+    Fetch a bearer token from LightRAG.
+    When auth is disabled LightRAG issues a guest token; when auth is enabled
+    it expects the API key as the password via /login.
+    """
+    # Try the configured API key first (auth enabled mode)
+    resp = requests.post(
+        f"{LIGHTRAG_URL}/login",
+        data={"username": "admin", "password": LIGHTRAG_KEY},
+        timeout=10,
+    )
+    if resp.ok:
+        return resp.json()["access_token"]
+
+    # Fall back to guest token (auth disabled mode)
+    resp = requests.get(f"{LIGHTRAG_URL}/auth-status", timeout=10)
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
 def _headers() -> dict:
     return {
-        "Authorization": f"Bearer {LIGHTRAG_KEY}",
+        "Authorization": f"Bearer {_get_token()}",
         "Content-Type": "application/json",
     }
 
@@ -64,13 +86,18 @@ def ingest_file(path: str) -> None:
     preamble = build_triples_preamble(doc.metadata)
     content = (preamble + "\n\n" + doc.content) if preamble else doc.content
 
+    meta = {
+        k: v.isoformat() if isinstance(v, (datetime.date, datetime.datetime)) else v
+        for k, v in doc.metadata.items()
+    }
+
     payload = {
-        "content": content,
-        "metadata": {"source": path, **doc.metadata},
+        "text": content,
+        "file_source": path,
     }
 
     resp = requests.post(
-        f"{LIGHTRAG_URL}/insert",
+        f"{LIGHTRAG_URL}/documents/text",
         headers=_headers(),
         json=payload,
         timeout=60,

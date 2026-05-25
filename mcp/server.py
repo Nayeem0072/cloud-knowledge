@@ -27,9 +27,36 @@ LIGHTRAG_URL = os.environ["LIGHTRAG_URL"].rstrip("/")
 LIGHTRAG_KEY = os.environ["LIGHTRAG_API_KEY"]
 MCP_KEY = os.environ["MCP_API_KEY"]
 
+_cached_token: str | None = None
+
+
+def _lg_token() -> str:
+    """
+    Fetch a bearer token from LightRAG.
+    Tries API key login first (auth enabled); falls back to guest token (auth disabled).
+    Result is cached for the lifetime of the process.
+    """
+    global _cached_token
+    if _cached_token:
+        return _cached_token
+
+    resp = requests.post(
+        f"{LIGHTRAG_URL}/login",
+        data={"username": "admin", "password": LIGHTRAG_KEY},
+        timeout=10,
+    )
+    if resp.ok:
+        _cached_token = resp.json()["access_token"]
+        return _cached_token
+
+    resp = requests.get(f"{LIGHTRAG_URL}/auth-status", timeout=10)
+    resp.raise_for_status()
+    _cached_token = resp.json()["access_token"]
+    return _cached_token
+
 
 def _lg_headers() -> dict:
-    return {"Authorization": f"Bearer {LIGHTRAG_KEY}"}
+    return {"Authorization": f"Bearer {_lg_token()}"}
 
 
 def _require_auth(x_api_key: str) -> None:
